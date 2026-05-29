@@ -1,75 +1,181 @@
 from abc import ABC, abstractmethod
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from sentence_transformers import CrossEncoder
 
 from app.config.settings import get_settings
 from app.rag.vector_store import ChromaVectorStore
 
+Document = Dict
+
 
 class RetrievalStrategy(ABC):
-    """Strategy Pattern: different retrieval algorithms can implement this interface."""
+    """
+    Abstract retrieval strategy.
+
+    Different retrieval implementations can inherit from
+    this interface and provide their own retrieval logic.
+    """
 
     @abstractmethod
-    def retrieve(self, query: str) -> List[Dict]:
-        """Retrieve the chunks that best match the user prompt."""
+    def retrieve(
+        self,
+        query: str,
+    ) -> List[Document]:
+        """
+        Retrieve the chunks that best match the query.
+
+        Args:
+            query: User question or search query.
+
+        Returns:
+            List of retrieved documents.
+        """
         raise NotImplementedError
 
 
-class SemanticRetrievalWithOptionalReranker(RetrievalStrategy):
-    """Semantic retrieval over Chroma plus optional safe CrossEncoder reranking.
+class SemanticRetrievalWithOptionalReranker(
+    RetrievalStrategy
+):
+    """
+    Semantic retrieval with optional CrossEncoder reranking.
 
-    The core retrieval is always Chroma vector similarity.
+    Retrieval flow:
 
-    The reranker is only a bonus. If the CrossEncoder fails because of Torch,
-    Transformers, device, or meta-tensor issues, the app falls back to the
-    vector-similarity ranking instead of crashing.
+    1. Embed the user query.
+    2. Search Chroma for nearest vectors.
+    3. Optionally rerank results with a CrossEncoder.
+    4. Return the best documents.
+
+    If the reranker fails, the system falls back to
+    Chroma similarity ranking instead of crashing.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
+        """Initialize retriever and optional reranker."""
         self.settings = get_settings()
+
         self.store = ChromaVectorStore()
-        self.reranker = None
-        self.reranker_error = None
 
-        if self.settings.use_reranker:
-            try:
-                # Force CPU to avoid many Docker/GPU/meta-tensor issues.
-                self.reranker = CrossEncoder(
-                    self.settings.reranker_model,
-                    device="cpu",
-                )
-            except Exception as exc:
-                self.reranker = None
-                self.reranker_error = f"{type(exc).__name__}: {exc}"
+        self.reranker: Optional[
+            CrossEncoder
+        ] = None
 
-    def retrieve(self, query: str) -> List[Dict]:
-        # Main retrieval: prompt embedding -> Chroma nearest vectors.
-        docs = self.store.search(query=query, k=self.settings.top_k)
+        self.reranker_error: Optional[
+            str
+        ] = None
 
-        if not docs:
+        self._initialize_reranker()
+
+    def _initialize_reranker(self) -> None:
+        """
+        Initialize the CrossEncoder reranker.
+
+        The reranker runs on CPU to avoid common
+        Docker, CUDA, and meta-tensor issues.
+        """
+        if not self.settings.use_reranker:
+            return
+
+        try:
+            self.reranker = CrossEncoder(
+                self.settings.reranker_model,
+                device="cpu",
+            )
+
+        except Exception as exc:
+            self.reranker = None
+            self.reranker_error = (
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    def retrieve(
+        self,
+        query: str,
+    ) -> List[Document]:
+        """
+        Retrieve documents using vector similarity.
+
+        Args:
+            query: User query.
+
+        Returns:
+            Top ranked documents.
+        """
+        documents = self.store.search(
+            query=query,
+            k=self.settings.top_k,
+        )
+
+        if not documents:
             return []
 
         if self.reranker:
-            try:
-                pairs = [(query, doc["text"]) for doc in docs]
-                scores = self.reranker.predict(pairs)
+            documents = self._rerank_documents(
+                query=query,
+                documents=documents,
+            )
 
-                for doc, score in zip(docs, scores):
-                    doc["rerank_score"] = float(score)
+        return documents[
+            : self.settings.final_k
+        ]
 
-                docs = sorted(
-                    docs,
-                    key=lambda item: item.get("rerank_score", 0.0),
-                    reverse=True,
+    def _rerank_documents(
+        self,
+        query: str,
+        documents: List[Document],
+    ) -> List[Document]:
+        """
+        Rerank retrieved documents using a CrossEncoder.
+
+        Args:
+            query: User query.
+            documents: Retrieved documents.
+
+        Returns:
+            Reranked documents.
+
+        Notes:
+            If reranking fails, the original
+            vector similarity ranking is returned.
+        """
+        try:
+            query_document_pairs = [
+                (query, document["text"])
+                for document in documents
+            ]
+
+            scores = self.reranker.predict(
+                query_document_pairs
+            )
+
+            for document, score in zip(
+                documents,
+                scores,
+            ):
+                document["rerank_score"] = float(
+                    score
                 )
 
-            except Exception as exc:
-                # Do not fail the RAG system if the bonus reranker fails.
-                # Keep the Chroma similarity order.
-                self.reranker = None
-                self.reranker_error = f"{type(exc).__name__}: {exc}"
-                for doc in docs:
-                    doc["rerank_error"] = self.reranker_error
+            return sorted(
+                documents,
+                key=lambda document: document.get(
+                    "rerank_score",
+                    0.0,
+                ),
+                reverse=True,
+            )
 
-        return docs[: self.settings.final_k]
+        except Exception as exc:
+            self.reranker = None
+
+            self.reranker_error = (
+                f"{type(exc).__name__}: {exc}"
+            )
+
+            for document in documents:
+                document[
+                    "rerank_error"
+                ] = self.reranker_error
+
+            return documents

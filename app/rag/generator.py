@@ -8,20 +8,38 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 
 from app.config.settings import get_settings
 
+NO_HISTORY_MESSAGE = "No hay historial previo."
+NO_CONTEXT_MESSAGE = (
+    "No encontré información suficiente en las páginas "
+    "indexadas para responder con confianza."
+)
 
+SOURCE_PREVIEW_LENGTH = 700
+
+SourceList = List[Dict]
+
+
+@lru_cache(maxsize=1)
 def get_gemini_llm() -> ChatGoogleGenerativeAI:
-    """Create the Gemini chat model through LangChain.
+    """
+    Create and cache the Gemini client.
 
-    The API key can come from either:
-    1. the .env file, or
-    2. the Streamlit sidebar, which writes GOOGLE_API_KEY into os.environ.
+    The API key can come from:
+    1. Environment variables.
+    2. The Streamlit sidebar.
+    3. The .env file.
     """
     settings = get_settings()
-    api_key = os.getenv("GOOGLE_API_KEY") or settings.google_api_key
+
+    api_key = (
+        os.getenv("GOOGLE_API_KEY")
+        or settings.google_api_key
+    )
 
     if not api_key:
         raise ValueError(
-            "GOOGLE_API_KEY is missing. Add it in the Streamlit sidebar or in your .env file."
+            "GOOGLE_API_KEY is missing. "
+            "Configure it in Streamlit or in the .env file."
         )
 
     return ChatGoogleGenerativeAI(
@@ -32,55 +50,109 @@ def get_gemini_llm() -> ChatGoogleGenerativeAI:
     )
 
 
-def format_retrieved_context(retrieved_docs: List[Dict]) -> str:
-    """Convert retrieved chunks into the context sent to Gemini."""
+def format_retrieved_context(
+    retrieved_docs: List[Dict],
+) -> str:
+    """
+    Convert retrieved chunks into a context block.
+
+    Args:
+        retrieved_docs: Retrieved RAG documents.
+
+    Returns:
+        Formatted context string.
+    """
     blocks = []
-    for i, doc in enumerate(retrieved_docs, start=1):
-        metadata = doc.get("metadata", {})
-        title = metadata.get("title", "Untitled")
-        url = metadata.get("url", "")
-        text = doc.get("text", "")
+
+    for index, document in enumerate(
+        retrieved_docs,
+        start=1,
+    ):
+        metadata = document.get("metadata", {})
 
         blocks.append(
-            f"""[Fuente {i}]
-Título: {title}
-URL: {url}
-Contenido:
-{text}
-"""
+            (
+                f"[Fuente {index}]\n"
+                f"Título: {metadata.get('title', 'Untitled')}\n"
+                f"URL: {metadata.get('url', '')}\n"
+                "Contenido:\n"
+                f"{document.get('text', '')}"
+            )
         )
 
     return "\n\n".join(blocks)
 
 
-def format_history(history: List[Dict]) -> str:
-    """Convert previous messages into a compact conversation memory string."""
+def format_history(
+    history: List[Dict],
+) -> str:
+    """
+    Convert conversation history into text.
+
+    Args:
+        history: Previous conversation messages.
+
+    Returns:
+        Formatted history string.
+    """
     if not history:
-        return "No hay historial previo."
+        return NO_HISTORY_MESSAGE
 
     return "\n".join(
-        f"{message['role']}: {message['content']}"
+        (
+            f"{message['role']}: "
+            f"{message['content']}"
+        )
         for message in history
     )
 
 
-def format_sources(retrieved_docs: List[Dict]) -> List[Dict]:
-    """Prepare source metadata for the Streamlit UI and SQLite persistence."""
+def format_sources(
+    retrieved_docs: List[Dict],
+) -> SourceList:
+    """
+    Prepare source metadata for persistence and UI display.
+
+    Args:
+        retrieved_docs: Retrieved documents.
+
+    Returns:
+        List of source metadata dictionaries.
+    """
     sources = []
 
-    for i, doc in enumerate(retrieved_docs, start=1):
-        metadata = doc.get("metadata", {})
+    for index, document in enumerate(
+        retrieved_docs,
+        start=1,
+    ):
+        metadata = document.get("metadata", {})
+
         sources.append(
             {
-                "rank": i,
-                "title": metadata.get("title", "Fuente"),
+                "rank": index,
+                "title": metadata.get(
+                    "title",
+                    "Fuente",
+                ),
                 "url": metadata.get("url", ""),
-                "chunk_index": metadata.get("chunk_index", ""),
-                "distance": doc.get("distance"),
-                "similarity_score": doc.get("similarity_score"),
-                "rerank_score": doc.get("rerank_score"),
-                "rerank_error": doc.get("rerank_error"),
-                "text_preview": doc.get("text", "")[:700],
+                "chunk_index": metadata.get(
+                    "chunk_index",
+                    "",
+                ),
+                "distance": document.get("distance"),
+                "similarity_score": document.get(
+                    "similarity_score"
+                ),
+                "rerank_score": document.get(
+                    "rerank_score"
+                ),
+                "rerank_error": document.get(
+                    "rerank_error"
+                ),
+                "text_preview": document.get(
+                    "text",
+                    "",
+                )[:SOURCE_PREVIEW_LENGTH],
             }
         )
 
@@ -88,92 +160,115 @@ def format_sources(retrieved_docs: List[Dict]) -> List[Dict]:
 
 
 def build_rag_chain():
-    """Build a LangChain RAG chain.
+    """
+    Build the LangChain RAG pipeline.
 
-    The retriever is implemented separately in app/rag/retrieval.py.
-    This chain receives:
-    - question
-    - retrieved_context
-    - history
-
-    and asks Gemini to answer grounded only in the retrieved context.
+    Returns:
+        Runnable LangChain chain.
     """
     prompt = ChatPromptTemplate.from_messages(
         [
             (
                 "system",
-                """Eres un asistente RAG especializado en información bancaria.
+                """
+Eres un asistente RAG especializado
+en información bancaria.
 
 Reglas:
 - Responde en español.
-- Usa el historial de conversación para entender referencias, seguimiento y contexto.
-- Usa únicamente el contexto recuperado como fuente factual principal.
-- Si el contexto recuperado no contiene la respuesta, responde exactamente:
-  "No encontré información suficiente en las fuentes indexadas."
+- Usa el historial para comprender contexto.
+- Usa únicamente el contexto recuperado
+  como fuente factual principal.
+- Si no existe información suficiente,
+  responde exactamente:
+  "No encontré información suficiente
+   en las fuentes indexadas."
 - No inventes datos.
-- Sé claro, directo y profesional.
-- Cuando sea útil, menciona que la respuesta se basa en las fuentes recuperadas.""",
+- Sé claro y profesional.
+                """,
             ),
             (
                 "human",
-                """Historial de conversación:
+                """
+Historial:
 {history}
 
-Contexto recuperado:
+Contexto:
 {retrieved_context}
 
-Pregunta del usuario:
+Pregunta:
 {question}
 
-Respuesta:""",
+Respuesta:
+                """,
             ),
         ]
     )
 
-    return prompt | get_gemini_llm() | StrOutputParser()
+    return (
+        prompt
+        | get_gemini_llm()
+        | StrOutputParser()
+    )
 
 
 def generate_answer(
     question: str,
     retrieved_docs: List[Dict],
     history: List[Dict],
-) -> Tuple[str, List[Dict]]:
-    """Generate the final RAG answer with Gemini through LangChain.
+) -> Tuple[str, SourceList]:
+    """
+    Generate a grounded answer using Gemini.
 
-    RAG flow:
-        question
-        -> app/rag/retrieval.py retrieves the most similar chunks
-        -> retrieved chunks are formatted as context
-        -> LangChain sends context + question + history to Gemini
-        -> Gemini returns a grounded answer
+    Args:
+        question: User question.
+        retrieved_docs: Retrieved chunks.
+        history: Conversation history.
+
+    Returns:
+        Tuple containing:
+        - Generated answer
+        - Source metadata
     """
     sources = format_sources(retrieved_docs)
 
     if not retrieved_docs:
-        return (
-            "No encontré información suficiente en las páginas indexadas para responder con confianza.",
-            sources,
-        )
+        return NO_CONTEXT_MESSAGE, sources
 
     try:
         chain = build_rag_chain()
+
         answer = chain.invoke(
             {
                 "question": question,
-                "retrieved_context": format_retrieved_context(retrieved_docs),
-                "history": format_history(history),
+                "retrieved_context": (
+                    format_retrieved_context(
+                        retrieved_docs
+                    )
+                ),
+                "history": format_history(
+                    history
+                ),
             }
         )
+
         return answer.strip(), sources
 
     except Exception as exc:
         context_preview = "\n\n".join(
-            f"- {doc.get('text', '')[:700]}" for doc in retrieved_docs[:3]
+            (
+                f"- {document.get('text', '')[:SOURCE_PREVIEW_LENGTH]}"
+            )
+            for document in retrieved_docs[:3]
         )
-        fallback = (
-            "No pude generar la respuesta con Gemini. "
-            "Aun así, estos son los fragmentos más relevantes recuperados:\n\n"
+
+        fallback_message = (
+            "No pude generar la respuesta "
+            "con Gemini.\n\n"
+            "Fragmentos recuperados:\n\n"
             f"{context_preview}\n\n"
-            f"Detalle técnico: {type(exc).__name__}: {exc}"
+            f"Detalle técnico: "
+            f"{type(exc).__name__}: {exc}"
         )
-        return fallback, sources
+
+        return fallback_message, sources

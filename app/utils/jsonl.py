@@ -1,19 +1,68 @@
 import json
 from pathlib import Path
-from typing import Iterable, Dict, Any, List
+from typing import Any, Dict, Iterable, List
+
+JsonRecord = Dict[str, Any]
 
 
-def write_jsonl(path: str, rows: Iterable[Dict[str, Any]]) -> None:
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("w", encoding="utf-8") as f:
+def write_jsonl(
+    path: str,
+    rows: Iterable[JsonRecord],
+) -> None:
+    """
+    Write records to a JSONL file.
+
+    Each record is written as a single JSON object
+    on its own line.
+
+    Args:
+        path: Output JSONL file path.
+        rows: Collection of JSON-serializable records.
+    """
+    output_path = Path(path)
+
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    with output_path.open(
+        mode="w",
+        encoding="utf-8",
+    ) as file:
         for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            file.write(
+                json.dumps(
+                    row,
+                    ensure_ascii=False,
+                )
+            )
+            file.write("\n")
 
 
-def read_jsonl(path: str) -> List[Dict[str, Any]]:
-    source = Path(path)
-    if not source.exists():
+def read_jsonl(
+    path: str,
+) -> List[JsonRecord]:
+    """
+    Read records from a JSONL file.
+
+    Args:
+        path: JSONL file path.
+
+    Returns:
+        List of parsed JSON objects.
+    """
+    input_path = Path(path)
+
+    if not input_path.exists():
         return []
-    with source.open("r", encoding="utf-8") as f:
-        return [json.loads(line) for line in f if line.strip()]
+
+    with input_path.open(
+        mode="r",
+        encoding="utf-8",
+    ) as file:
+        return [
+            json.loads(line)
+            for line in file
+            if line.strip()
+        ]
