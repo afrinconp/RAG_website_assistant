@@ -197,27 +197,11 @@ These metrics can help estimate impact, adoption, user needs, and possible impro
 ## Future Improvements
 
 - Add an optional Gemini/OpenAI/Ollama LLM provider.
-- Add Playwright for JavaScript-heavy pages.
 - Add hybrid retrieval with BM25 + embeddings.
 - Add automated evaluation for RAG quality.
 - Add authentication and user-level session management.
 - Add CI tests and linting.
 
-## Suggested Commit History
-
-For the real submission, avoid a single large commit. A good commit progression would be:
-
-```text
-feat: initialize project structure and docker setup
-feat: add configurable web scraper
-feat: persist raw and processed scraped data
-feat: add chunking and vector indexing pipeline
-feat: implement retrieval and reranking strategy
-feat: add conversation memory with sqlite
-feat: add streamlit chat interface
-feat: add conversation analytics dashboard
-docs: document design patterns and setup instructions
-```
 
 ## Hugging Face generation model
 
