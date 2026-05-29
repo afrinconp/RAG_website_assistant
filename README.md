@@ -104,7 +104,7 @@ Optional for local development without Docker:
 Clone the repository:
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/afrinconp/RAG_website_assistant.git
 cd rag_bank_assistant
 ```
 
